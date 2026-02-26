@@ -7,6 +7,7 @@ Each public function has the signature ``(state, llm) -> dict`` and returns a
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import re
 
@@ -104,6 +105,7 @@ async def _generate_single(
                     "date": cluster["date"],
                     "summary": parsed["summary"][:k],
                     "reasoning": parsed.get("reasoning", ""),
+                    "article_count": cluster.get("article_count", 0),
                 }
         except Exception as exc:
             print(f"  [generate] cluster {cluster['cluster_id']} failed: {exc}")
@@ -243,23 +245,83 @@ async def verify_timeline(state: dict, llm) -> dict:
 # Node: finalize_timeline
 # ---------------------------------------------------------------------------
 
+_ARTICLE_COUNT_WEIGHT = 2.0   # max bonus from article density (on a 0-20 scale)
+_ADJACENCY_PENALTY = 0.5     # score multiplier for dates within ±1 day of a pick
+_ADJACENCY_DAYS = 1          # how many days count as "adjacent"
+
+
 async def finalize_timeline(state: dict, llm) -> dict:
-    """Deduplicate by date, enforce *max_dates*, and produce the output list."""
+    """Select the *max_dates* most important entries with temporal diversity.
+
+    Algorithm
+    ---------
+    1. Deduplicate by date (keep highest LLM-scored entry per date).
+    2. Compute a composite score per entry:
+         ``(importance + relevance) + article_count_bonus``
+       where ``article_count_bonus`` scales linearly up to
+       ``_ARTICLE_COUNT_WEIGHT``.
+    3. Greedy iterative selection (like MMR for temporal spread):
+       - Pick the highest-scoring entry.
+       - Penalise remaining entries whose dates fall within
+         ``±_ADJACENCY_DAYS`` of any already-selected date.
+       - Repeat until *max_dates* entries are selected.
+    4. Sort the selected entries chronologically for the final output.
+    """
     entries = state.get("verified_entries", [])
     max_dates = state["max_dates"]
 
-    # Keep the highest-scored entry per date
-    by_date: dict[str, tuple[dict, float]] = {}
+    if not entries:
+        print("  [finalize] no entries to finalize")
+        return {"timeline": []}
+
+    # -- Step 1: deduplicate by date (keep best per date) ----------------
+    by_date: dict[str, dict] = {}
     for e in entries:
         d = e["date"]
         score = e.get("importance_score", 0) + e.get("relevance_score", 0)
-        if d not in by_date or score > by_date[d][1]:
-            by_date[d] = (e, score)
+        if d not in by_date:
+            by_date[d] = e
+        else:
+            prev = by_date[d]
+            prev_score = prev.get("importance_score", 0) + prev.get("relevance_score", 0)
+            if score > prev_score:
+                by_date[d] = e
 
-    sorted_entries = sorted(by_date.values(), key=lambda x: x[0]["date"])
-    timeline = [
-        {"date": e["date"], "summary": e["summary"]}
-        for e, _ in sorted_entries[:max_dates]
-    ]
+    pool = list(by_date.values())
+
+    # -- Step 2: composite scores ----------------------------------------
+    max_ac = max((e.get("article_count", 0) for e in pool), default=1) or 1
+
+    scores: dict[str, float] = {}
+    for e in pool:
+        llm_score = e.get("importance_score", 0) + e.get("relevance_score", 0)
+        ac_bonus = (e.get("article_count", 0) / max_ac) * _ARTICLE_COUNT_WEIGHT
+        scores[e["date"]] = llm_score + ac_bonus
+
+    # -- Step 3: greedy selection with adjacency penalty -----------------
+    selected: list[dict] = []
+    selected_dates: list[datetime.date] = []
+
+    def _parse_date(ds: str) -> datetime.date:
+        return datetime.datetime.strptime(ds, "%Y-%m-%d").date()
+
+    while pool and len(selected) < max_dates:
+        # pick the entry with the highest (possibly penalised) score
+        best_idx = max(range(len(pool)), key=lambda i: scores[pool[i]["date"]])
+        best = pool.pop(best_idx)
+        selected.append(best)
+        selected_dates.append(_parse_date(best["date"]))
+
+        # penalise remaining entries that are temporally adjacent
+        for e in pool:
+            e_date = _parse_date(e["date"])
+            for sd in selected_dates:
+                if abs((e_date - sd).days) <= _ADJACENCY_DAYS:
+                    scores[e["date"]] *= _ADJACENCY_PENALTY
+                    break  # one penalty per round is enough
+
+    # -- Step 4: sort chronologically ------------------------------------
+    selected.sort(key=lambda e: e["date"])
+    timeline = [{"date": e["date"], "summary": e["summary"]} for e in selected]
     print(f"  [finalize] timeline has {len(timeline)} entries")
     return {"timeline": timeline}
