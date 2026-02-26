@@ -1,5 +1,7 @@
 """LLM provider configuration (Groq via OpenAI-compatible API)."""
 
+from __future__ import annotations
+
 import os
 from langchain_openai import ChatOpenAI
 
