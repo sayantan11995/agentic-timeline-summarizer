@@ -132,7 +132,7 @@ class CentroidOpt(Summarizer):
                 if len(selected) > 0:
                     new_x = X[i]
                     new_summary_vector = sparse.vstack([new_x, summary_vector])
-                    new_summary_vector = normalize(new_summary_vector.sum(0))
+                    new_summary_vector = normalize(sparse.csr_matrix(new_summary_vector.sum(0)))
                 else:
                     new_summary_vector = X[i]
                 score = cosine_similarity(new_summary_vector, centroid)[0, 0]
