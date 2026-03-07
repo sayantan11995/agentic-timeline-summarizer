@@ -3,7 +3,7 @@ from pathlib import Path
 from tilse.data.timelines import Timeline as TilseTimeline
 from tilse.data.timelines import GroundTruth as TilseGroundTruth
 from tilse.evaluation import rouge
-from news_tls import utils, data, datewise, clust, summarizers, agentic_clust
+from news_tls import utils, data, datewise, clust, summarizers, agentic_clust, agentic_datewise
 from pprint import pprint
 
 
@@ -191,6 +191,36 @@ def main(args):
             clip_sents=5,
             unique_dates=True,
         )
+
+    elif args.method == 'agentic_datewise':
+        # Agentic datewise: LLM-based date ranking (3 LLM calls) +
+        # traditional sentence collection & extractive summarisation.
+        # Uses MentionCountDateRanker as pre-filter by default.
+        # Optionally uses SupervisedDateRanker if resources are provided.
+        base_ranker = datewise.MentionCountDateRanker()
+        key_to_model = None
+        if args.resources:
+            resources = Path(args.resources)
+            models_path = resources / 'supervised_date_ranker.{}.pkl'.format(
+                dataset_name
+            )
+            if models_path.exists():
+                key_to_model = utils.load_pkl(models_path)
+                base_ranker = datewise.SupervisedDateRanker(method='regression')
+
+        date_ranker = agentic_datewise.AgenticDateRanker(
+            base_ranker=base_ranker,
+        )
+        sent_collector = datewise.PM_Mean_SentenceCollector(
+            clip_sents=5, pub_end=2)
+        summarizer = summarizers.CentroidOpt()
+        system = datewise.DatewiseTimelineGenerator(
+            date_ranker=date_ranker,
+            summarizer=summarizer,
+            sent_collector=sent_collector,
+            key_to_model=key_to_model,
+        )
+
     else:
         raise ValueError(f'Method not found: {args.method}')
 

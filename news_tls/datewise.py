@@ -40,7 +40,7 @@ class DatewiseTimelineGenerator():
         vectorizer.fit([s.raw for a in collection.articles() for s in a.sentences])
 
         print('date ranking...')
-        ranked_dates = self.date_ranker.rank_dates(collection)
+        ranked_dates = self.date_ranker.rank_dates(collection, max_dates=max_dates)
 
         start = collection.start.date()
         end = collection.end.date()
@@ -97,19 +97,19 @@ class DatewiseTimelineGenerator():
 ################################ DATE RANKING ##################################
 
 class DateRanker:
-    def rank_dates(self, collection, date_buckets):
+    def rank_dates(self, collection, **kwargs):
         raise NotImplementedError
 
 
 class RandomDateRanker(DateRanker):
-    def rank_dates(self, collection):
+    def rank_dates(self, collection, **kwargs):
         dates = [a.time.date() for a in collection.articles()]
         random.shuffle(dates)
         return dates
 
 
 class MentionCountDateRanker(DateRanker):
-    def rank_dates(self, collection):
+    def rank_dates(self, collection, **kwargs):
         date_to_count = collections.defaultdict(int)
         for a in collection.articles():
             for s in a.sentences:
@@ -121,7 +121,7 @@ class MentionCountDateRanker(DateRanker):
 
 
 class PubCountDateRanker(DateRanker):
-    def rank_dates(self, collection):
+    def rank_dates(self, collection, **kwargs):
         dates = [a.time.date() for a in collection.articles()]
         counts = collections.Counter(dates)
         ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)
@@ -135,7 +135,7 @@ class SupervisedDateRanker(DateRanker):
         if method not in ['classification', 'regression']:
             raise ValueError('method must be classification or regression')
 
-    def rank_dates(self, collection):
+    def rank_dates(self, collection, **kwargs):
         dates, X = self.extract_features(collection)
         X = normalize(X, norm='l2', axis=0)
         if self.method == 'classification':

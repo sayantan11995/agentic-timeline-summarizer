@@ -1,6 +1,6 @@
 import argparse
 from pathlib import Path
-from news_tls import utils, data, datewise, clust, summarizers, agentic_clust
+from news_tls import utils, data, datewise, clust, summarizers, agentic_clust, agentic_datewise
 from pprint import pprint
 
 
@@ -82,6 +82,29 @@ def main(args):
             clip_sents=2,
             unique_dates=True,
         )
+
+    elif args.method == 'agentic_datewise':
+        base_ranker = datewise.MentionCountDateRanker()
+        key_to_model = None
+        if args.model:
+            key_to_model = utils.load_pkl(args.model)
+            models = list(key_to_model.values())
+            base_ranker = datewise.SupervisedDateRanker(method='regression')
+            base_ranker.model = models[0]
+
+        date_ranker = agentic_datewise.AgenticDateRanker(
+            base_ranker=base_ranker,
+        )
+        sent_collector = datewise.PM_Mean_SentenceCollector(
+            clip_sents=2, pub_end=2)
+        summarizer = summarizers.CentroidOpt()
+        system = datewise.DatewiseTimelineGenerator(
+            date_ranker=date_ranker,
+            summarizer=summarizer,
+            sent_collector=sent_collector,
+            key_to_model=key_to_model,
+        )
+
     else:
         raise ValueError(f'Method not found: {args.method}')
 
