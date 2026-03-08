@@ -194,7 +194,8 @@ def main(args):
 
     elif args.method == 'agentic_datewise':
         # Agentic datewise: LLM-based date ranking (3 LLM calls) +
-        # traditional sentence collection & extractive summarisation.
+        # LLM-based abstractive summarisation (default) or legacy
+        # CentroidOpt extractive summarisation (--summarizer centroid).
         # Uses MentionCountDateRanker as pre-filter by default.
         # Optionally uses SupervisedDateRanker if resources are provided.
         base_ranker = datewise.MentionCountDateRanker()
@@ -208,16 +209,18 @@ def main(args):
                 key_to_model = utils.load_pkl(models_path)
                 base_ranker = datewise.SupervisedDateRanker(method='regression')
 
+        # Choose summarizer: agentic (default) or legacy centroid
+        if getattr(args, 'summarizer', 'agentic') == 'centroid':
+            summarizer_override = summarizers.CentroidOpt()
+        else:
+            summarizer_override = None  # AgenticDatewiseTimelineGenerator defaults to AgenticSummarizer
+
         date_ranker = agentic_datewise.AgenticDateRanker(
             base_ranker=base_ranker,
         )
-        sent_collector = datewise.PM_Mean_SentenceCollector(
-            clip_sents=5, pub_end=2)
-        summarizer = summarizers.CentroidOpt()
-        system = datewise.DatewiseTimelineGenerator(
+        system = agentic_datewise.AgenticDatewiseTimelineGenerator(
             date_ranker=date_ranker,
-            summarizer=summarizer,
-            sent_collector=sent_collector,
+            summarizer=summarizer_override,
             key_to_model=key_to_model,
         )
 
@@ -238,4 +241,7 @@ if __name__ == '__main__':
     parser.add_argument('--resources', default=None,
         help='model resources for tested method')
     parser.add_argument('--output', default=None)
+    parser.add_argument('--summarizer', default='agentic',
+        choices=['agentic', 'centroid'],
+        help='Summarizer for agentic_datewise: "agentic" (LLM, default) or "centroid" (legacy extractive)')
     main(parser.parse_args())

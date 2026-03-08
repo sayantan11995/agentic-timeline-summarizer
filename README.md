@@ -94,19 +94,30 @@ with additional fields without breaking existing nodes.
 #### Agentic datewise method (LangGraph + Groq)
 
 The `agentic_datewise` method enhances the datewise pipeline with LLM-powered
-date ranking while keeping traditional extractive summarisation.  It uses only
-**3 LLM calls** per topic (vs ~62 for `agentic_clust`), making it a lightweight
-but effective hybrid approach.
+date ranking **and** LLM-powered abstractive summarisation (default).  It uses
+**3+N LLM calls** per topic (3 for date ranking + N for summarisation, typically
+~13 total), making it a balanced middle ground between pure statistical methods
+and the heavier `agentic_clust` (~62 calls).
+
+The legacy extractive summariser (`CentroidOpt`) is available as a fallback
+via `--summarizer centroid`.
 
 ```bash
 # 1. Set your Groq API key
 export GROQ_API_KEY="gsk_..."
 
-# 2. Run the agentic datewise method
+# 2. Run with agentic summariser (default)
 python experiments/evaluate.py \
     --dataset $DATASETS/entities \
     --method agentic_datewise \
     --output $RESULTS/entities.agentic_datewise.json
+
+# 3. Run with legacy extractive summariser (CentroidOpt fallback)
+python experiments/evaluate.py \
+    --dataset $DATASETS/entities \
+    --method agentic_datewise \
+    --summarizer centroid \
+    --output $RESULTS/entities.agentic_datewise.centroid.json
 
 # Optional: use supervised date ranker as pre-filter (needs trained models)
 python experiments/evaluate.py \
@@ -160,10 +171,13 @@ python experiments/evaluate.py \
                     │  └──────────────┬────────────────────────┘  │
                     │                 │                            │
                     │  ┌──────────────▼────────────────────────┐  │
-                    │  │     Downstream (no LLM, unchanged)    │  │
+                    │  │     Summarisation (N LLM calls)       │  │
                     │  │                                       │  │
                     │  │  PM_Mean_SentenceCollector             │  │
-                    │  │  → CentroidOpt extractive summariser  │  │
+                    │  │  → AgenticSummarizer (default)        │  │
+                    │  │    LLM abstractive per date           │  │
+                    │  │    (fallback: CentroidOpt extractive  │  │
+                    │  │     via --summarizer centroid)         │  │
                     │  │  → Timeline                           │  │
                     │  └───────────────────────────────────────┘  │
                     └─────────────────────────────────────────────┘
@@ -175,13 +189,14 @@ python experiments/evaluate.py \
 ┌─────────────────────┬────────────┬───────────────────────┬──────────────────┐
 │                     │  datewise  │  agentic_datewise     │  agentic_clust   │
 ├─────────────────────┼────────────┼───────────────────────┼──────────────────┤
-│ LLM Calls           │     0      │         3             │      ~62         │
+│ LLM Calls           │     0      │       3+N (~13)       │      ~62         │
 │ Date Ranking        │ Statistical│ LLM batch + verify    │ LLM per-cluster  │
-│ Summarisation       │ Extractive │ Extractive            │ LLM abstractive  │
+│ Summarisation       │ Extractive │ LLM abstractive*      │ LLM abstractive  │
 │ Self-Reflection     │     No     │        Yes            │      Yes         │
 │ Topic Awareness     │     No     │        Yes            │      Yes         │
 │ Temporal Diversity  │     No     │ Adjacency penalty     │ Adjacency penalty│
 └─────────────────────┴────────────┴───────────────────────┴──────────────────┘
+  * Default; use --summarizer centroid for legacy extractive (3 LLM calls only)
 ```
 
 ##### Architecture overview
@@ -193,10 +208,15 @@ news_tls/agentic/
   datewise_graph.py  -- 4-node LangGraph builder
   prompts.py         -- RANK_DATES_PROMPT, VERIFY_DATES_PROMPT (added)
 
+news_tls/summarizers.py
+  AgenticSummarizer                    -- LLM abstractive summarizer (default)
+                                          with CentroidOpt fallback
+
 news_tls/agentic_datewise.py
-  AgenticDateRanker                    -- LLM-based date ranker (plugs into
-      DatewiseTimelineGenerator)
-  AgenticDatewiseTimelineGenerator     -- convenience subclass
+  AgenticDateRanker                    -- LLM-based date ranker with topic
+                                          context storage
+  AgenticDatewiseTimelineGenerator     -- threads topic context from ranker
+                                          to summarizer; overrides predict()
 ```
 
 ### Format & preprocess your own dataset

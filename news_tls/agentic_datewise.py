@@ -49,6 +49,10 @@ class AgenticDateRanker(DateRanker):
         self.candidate_multiplier = candidate_multiplier
         self._llm = llm or get_llm()
         self._graph = build_datewise_graph(self._llm)
+        # Topic context — populated after the LangGraph pipeline runs
+        self.topic_description = None
+        self.topic_type = None
+        self.timeline_focus = None
 
     # Forward model property to base_ranker (for SupervisedDateRanker compat)
     @property
@@ -92,6 +96,11 @@ class AgenticDateRanker(DateRanker):
             "max_dates": max_dates,
         }
         result = asyncio.run(self._graph.ainvoke(initial_state))
+
+        # Store topic context so the summarizer can use it later
+        self.topic_description = result.get("topic_description", "")
+        self.topic_type = result.get("topic_type", "other")
+        self.timeline_focus = result.get("timeline_focus", "key events and developments")
 
         # --- Step 4: Parse ranked dates back to date objects ---
         ranked_strs = result.get("ranked_dates", [])
@@ -194,11 +203,12 @@ class AgenticDateRanker(DateRanker):
 
 
 class AgenticDatewiseTimelineGenerator(DatewiseTimelineGenerator):
-    """DatewiseTimelineGenerator with agentic LLM-based date ranking.
+    """DatewiseTimelineGenerator with agentic LLM-based date ranking **and**
+    agentic LLM-based summarization (default).
 
-    Uses the same pipeline as DatewiseTimelineGenerator but replaces the
-    date ranker with AgenticDateRanker.  Sentence collection and
-    summarisation remain unchanged (PM_Mean + CentroidOpt).
+    By default the summarizer is ``AgenticSummarizer`` which produces
+    abstractive summaries via LLM.  Pass ``summarizer=CentroidOpt()`` to
+    fall back to the legacy extractive summarizer.
     """
 
     def __init__(
@@ -211,13 +221,92 @@ class AgenticDatewiseTimelineGenerator(DatewiseTimelineGenerator):
         key_to_model=None,
         llm=None,
     ):
+        _llm = llm or get_llm()
         if date_ranker is None:
-            date_ranker = AgenticDateRanker(llm=llm)
+            date_ranker = AgenticDateRanker(llm=_llm)
+        if summarizer is None:
+            summarizer = summarizers.AgenticSummarizer(llm=_llm)
         super().__init__(
             date_ranker=date_ranker,
-            summarizer=summarizer or summarizers.CentroidOpt(),
+            summarizer=summarizer,
             sent_collector=sent_collector or PM_Mean_SentenceCollector(
                 clip_sents, pub_end
             ),
             key_to_model=key_to_model,
         )
+
+    def predict(
+        self,
+        collection,
+        max_dates=10,
+        max_summary_sents=1,
+        ref_tl=None,
+        input_titles=False,
+        output_titles=False,
+        output_body_sents=True,
+    ):
+        print('vectorizer...')
+        vectorizer = TfidfVectorizer(stop_words='english', lowercase=True)
+        vectorizer.fit([s.raw for a in collection.articles() for s in a.sentences])
+
+        print('date ranking...')
+        ranked_dates = self.date_ranker.rank_dates(collection, max_dates=max_dates)
+
+        # --- Transfer topic context from ranker to summarizer ---
+        if (hasattr(self.date_ranker, 'topic_description') and
+                hasattr(self.summarizer, 'set_topic_context') and
+                self.date_ranker.topic_description is not None):
+            self.summarizer.set_topic_context(
+                self.date_ranker.topic_description,
+                self.date_ranker.topic_type,
+                self.date_ranker.timeline_focus,
+            )
+            print('  [agentic] topic context transferred to summarizer')
+
+        start = collection.start.date()
+        end = collection.end.date()
+        ranked_dates = [d for d in ranked_dates if start <= d <= end]
+
+        print('candidates & summarization...')
+        dates_with_sents = self.sent_collector.collect_sents(
+            ranked_dates,
+            collection,
+            vectorizer,
+            include_titles=input_titles,
+        )
+
+        def sent_filter(sent):
+            lower = sent.raw.lower()
+            if not any([kw in lower for kw in collection.keywords]):
+                return False
+            elif not output_titles and sent.is_title:
+                return False
+            elif not output_body_sents and not sent.is_sent:
+                return False
+            return True
+
+        timeline = []
+        l = 0
+        for i, (d, d_sents) in enumerate(dates_with_sents):
+            if l >= max_dates:
+                break
+
+            # Set the current date on the summarizer so it can include it
+            # in the LLM prompt (AgenticSummarizer uses this; CentroidOpt
+            # ignores it via duck typing).
+            if hasattr(self.summarizer, 'current_date'):
+                self.summarizer.current_date = d
+
+            summary = self.summarizer.summarize(
+                d_sents,
+                k=max_summary_sents,
+                vectorizer=vectorizer,
+                filter=sent_filter,
+            )
+            if summary:
+                time = datetime.datetime(d.year, d.month, d.day)
+                timeline.append((time, summary))
+                l += 1
+
+        timeline.sort(key=lambda x: x[0])
+        return data.Timeline(timeline)
