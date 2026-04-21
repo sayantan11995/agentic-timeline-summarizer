@@ -91,6 +91,134 @@ new nodes can be inserted into the graph (e.g., a multi-agent debate step
 for key-date extraction), and the `TimelineState` TypedDict can be extended
 with additional fields without breaking existing nodes.
 
+#### Agentic datewise method (LangGraph + Groq)
+
+The `agentic_datewise` method enhances the datewise pipeline with LLM-powered
+date ranking **and** LLM-powered abstractive summarisation (default).  It uses
+**3+N LLM calls** per topic (3 for date ranking + N for summarisation, typically
+~13 total), making it a balanced middle ground between pure statistical methods
+and the heavier `agentic_clust` (~62 calls).
+
+The legacy extractive summariser (`CentroidOpt`) is available as a fallback
+via `--summarizer centroid`.
+
+```bash
+# 1. Set your Groq API key
+export GROQ_API_KEY="gsk_..."
+
+# 2. Run with agentic summariser (default)
+python experiments/evaluate.py \
+    --dataset $DATASETS/entities \
+    --method agentic_datewise \
+    --output $RESULTS/entities.agentic_datewise.json
+
+# 3. Run with legacy extractive summariser (CentroidOpt fallback)
+python experiments/evaluate.py \
+    --dataset $DATASETS/entities \
+    --method agentic_datewise \
+    --summarizer centroid \
+    --output $RESULTS/entities.agentic_datewise.centroid.json
+
+# Optional: use supervised date ranker as pre-filter (needs trained models)
+python experiments/evaluate.py \
+    --dataset $DATASETS/entities \
+    --method agentic_datewise \
+    --resources $RESOURCES \
+    --output $RESULTS/entities.agentic_datewise.json
+```
+
+##### Pipeline overview
+
+```
+                    ┌─────────────────────────────────────────────┐
+   News Articles    │          agentic_datewise pipeline          │
+   + Keywords       │                                             │
+        │           │  ┌───────────────────────────────────────┐  │
+        ▼           │  │     Pre-Filter (no LLM)               │  │
+  ┌───────────┐     │  │                                       │  │
+  │ TF-IDF    │────▶│  │  MentionCountDateRanker               │  │
+  │ Vectorizer│     │  │  → top 3×N candidate dates (~30)      │  │
+  └───────────┘     │  │  → build date cards (stats + sents)   │  │
+                    │  └──────────────┬────────────────────────┘  │
+                    │                 │                            │
+                    │  ┌──────────────▼────────────────────────┐  │
+                    │  │     LangGraph (3 LLM calls)           │  │
+                    │  │                                       │  │
+                    │  │  ┌─────────────┐  LLM call #1         │  │
+                    │  │  │expand_query │  keywords → topic     │  │
+                    │  │  │             │  description, type,   │  │
+                    │  │  │             │  focus areas           │  │
+                    │  │  └──────┬──────┘                       │  │
+                    │  │         ▼                               │  │
+                    │  │  ┌─────────────┐  LLM call #2         │  │
+                    │  │  │rank_dates   │  ALL ~30 date cards   │  │
+                    │  │  │  _batch     │  in ONE call → ranked │  │
+                    │  │  │             │  list + importance     │  │
+                    │  │  └──────┬──────┘                       │  │
+                    │  │         ▼                               │  │
+                    │  │  ┌─────────────┐  LLM call #3         │  │
+                    │  │  │verify_dates │  Self-reflection:     │  │
+                    │  │  │             │  missing events?       │  │
+                    │  │  │             │  temporal gaps?         │  │
+                    │  │  │             │  narrative complete?    │  │
+                    │  │  └──────┬──────┘                       │  │
+                    │  │         ▼                               │  │
+                    │  │  ┌─────────────┐  deterministic        │  │
+                    │  │  │select_dates │  0.7×LLM + 0.3×heur  │  │
+                    │  │  │             │  + adjacency penalty   │  │
+                    │  │  │             │  → top N dates         │  │
+                    │  │  └─────────────┘                       │  │
+                    │  └──────────────┬────────────────────────┘  │
+                    │                 │                            │
+                    │  ┌──────────────▼────────────────────────┐  │
+                    │  │     Summarisation (N LLM calls)       │  │
+                    │  │                                       │  │
+                    │  │  PM_Mean_SentenceCollector             │  │
+                    │  │  → AgenticSummarizer (default)        │  │
+                    │  │    LLM abstractive per date           │  │
+                    │  │    (fallback: CentroidOpt extractive  │  │
+                    │  │     via --summarizer centroid)         │  │
+                    │  │  → Timeline                           │  │
+                    │  └───────────────────────────────────────┘  │
+                    └─────────────────────────────────────────────┘
+```
+
+##### Method comparison
+
+```
+┌─────────────────────┬────────────┬───────────────────────┬──────────────────┐
+│                     │  datewise  │  agentic_datewise     │  agentic_clust   │
+├─────────────────────┼────────────┼───────────────────────┼──────────────────┤
+│ LLM Calls           │     0      │       3+N (~13)       │      ~62         │
+│ Date Ranking        │ Statistical│ LLM batch + verify    │ LLM per-cluster  │
+│ Summarisation       │ Extractive │ LLM abstractive*      │ LLM abstractive  │
+│ Self-Reflection     │     No     │        Yes            │      Yes         │
+│ Topic Awareness     │     No     │        Yes            │      Yes         │
+│ Temporal Diversity  │     No     │ Adjacency penalty     │ Adjacency penalty│
+└─────────────────────┴────────────┴───────────────────────┴──────────────────┘
+  * Default; use --summarizer centroid for legacy extractive (3 LLM calls only)
+```
+
+##### Architecture overview
+
+```
+news_tls/agentic/
+  datewise_state.py  -- DatewiseState TypedDict
+  datewise_nodes.py  -- rank_dates_batch, verify_dates, select_dates
+  datewise_graph.py  -- 4-node LangGraph builder
+  prompts.py         -- RANK_DATES_PROMPT, VERIFY_DATES_PROMPT (added)
+
+news_tls/summarizers.py
+  AgenticSummarizer                    -- LLM abstractive summarizer (default)
+                                          with CentroidOpt fallback
+
+news_tls/agentic_datewise.py
+  AgenticDateRanker                    -- LLM-based date ranker with topic
+                                          context storage
+  AgenticDatewiseTimelineGenerator     -- threads topic context from ranker
+                                          to summarizer; overrides predict()
+```
+
 ### Format & preprocess your own dataset
 If you have a new dataset yourself and want to use preprocess it as the datasets above, check out the [preprocessing steps here](preprocessing).
 

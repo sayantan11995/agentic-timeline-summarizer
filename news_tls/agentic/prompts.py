@@ -89,3 +89,70 @@ Respond with **only** the JSON object below (no markdown fences):
     "removed_reasons": {{"2": "Redundant with entry 1"}},
     "feedback": "Overall assessment"
 }}"""
+
+# ---------------------------------------------------------------------------
+# Agentic datewise pipeline prompts
+# ---------------------------------------------------------------------------
+
+RANK_DATES_PROMPT = """\
+You are a timeline construction expert.  Given candidate dates for a
+**{topic_type}** timeline about: "{topic_description}"
+
+Focus: {timeline_focus}
+
+Select and rank the top {max_dates} most important dates for this timeline.
+Consider: narrative significance, turning points, major developments,
+and temporal coverage (avoid clustering too many dates together).
+
+Candidate dates:
+{date_entries}
+
+Requirements:
+- Select exactly {max_dates} dates.
+- Rank them by importance (most important first).
+- Ensure temporal spread across the timeline.
+- For a **{topic_type}** topic, prioritise: {timeline_focus}.
+
+Respond with **only** the JSON object below (no markdown fences):
+{{
+    "selected_dates": [
+        {{"date": "YYYY-MM-DD", "importance": 9, "reasoning": "Brief reason"}},
+        ...
+    ]
+}}"""
+
+VERIFY_DATES_PROMPT = """\
+You are a timeline quality verifier.  Review the proposed date selection for a
+**{topic_type}** timeline about: "{topic_description}"
+
+Focus: {timeline_focus}
+
+The following dates were selected as the most important:
+{selected_entries}
+
+All candidate dates that were available:
+{all_candidates}
+
+Self-reflect on this selection.  Check for:
+1. **Missing key events** – Are there important candidate dates that were
+   overlooked?  Check if any high-mention candidate was excluded without
+   good reason.
+2. **Temporal clustering** – Are too many selected dates bunched together
+   while leaving large gaps in the timeline?
+3. **Relevance** – Does every selected date genuinely relate to the core
+   topic?
+4. **Narrative completeness** – Does the selection tell the full story
+   (beginning, development, resolution/outcome)?
+
+If the selection is good, return it unchanged.  If not, provide a corrected
+list of exactly {max_dates} dates.
+
+Respond with **only** the JSON object below (no markdown fences):
+{{
+    "needs_correction": true,
+    "corrected_dates": [
+        {{"date": "YYYY-MM-DD", "importance": 9, "reasoning": "Brief reason"}},
+        ...
+    ],
+    "reflection": "What was wrong and what was fixed"
+}}"""

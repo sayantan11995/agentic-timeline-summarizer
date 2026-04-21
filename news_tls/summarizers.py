@@ -1,8 +1,13 @@
+import asyncio
+
 import networkx as nx
 from scipy import sparse
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 from sklearn.cluster import MiniBatchKMeans
+
+from news_tls.agentic.prompts import GENERATE_CANDIDATE_PROMPT
+from news_tls.agentic.nodes import _parse_json
 
 
 class Summarizer:
@@ -279,3 +284,64 @@ class SubmodularSummarizer(Summarizer):
 
         summary = [sents[i].raw for i in selected]
         return summary
+
+
+class AgenticSummarizer(Summarizer):
+    """LLM-based abstractive summarizer for individual dates.
+
+    Reuses ``GENERATE_CANDIDATE_PROMPT`` from the agentic_clust pipeline.
+    Falls back to ``CentroidOpt`` if the LLM call fails or topic context
+    has not been set.
+    """
+
+    def __init__(self, llm=None, fallback=None):
+        self.name = 'Agentic LLM Summarizer'
+        self._llm = llm
+        self._fallback = fallback or CentroidOpt()
+        # Topic context — set externally via set_topic_context()
+        self.topic_description = None
+        self.topic_type = None
+        self.timeline_focus = None
+        # Current date — set per-date in the predict() loop
+        self.current_date = None
+
+    def set_topic_context(self, topic_description, topic_type, timeline_focus):
+        """Store topic context obtained from the expand_query node."""
+        self.topic_description = topic_description
+        self.topic_type = topic_type
+        self.timeline_focus = timeline_focus
+
+    def summarize(self, sents, k, vectorizer, filter=None):
+        # Falls back to CentroidOpt if no topic context or no LLM
+        if not self.topic_description or self._llm is None:
+            return self._fallback.summarize(sents, k, vectorizer, filter)
+
+        eligible = [s for s in sents if filter(s)] if filter else list(sents)
+        if not eligible:
+            return []
+
+        date_str = str(self.current_date) if self.current_date else "unknown"
+        sents_text = "\n".join(f"- {s.raw}" for s in eligible[:30])
+
+        prompt = GENERATE_CANDIDATE_PROMPT.format(
+            topic_description=self.topic_description,
+            topic_type=self.topic_type,
+            date=date_str,
+            timeline_focus=self.timeline_focus,
+            sentences=sents_text,
+            k=k,
+        )
+
+        try:
+            resp = asyncio.run(self._llm.ainvoke(prompt))
+            parsed = _parse_json(resp.content)
+            if parsed and "summary" in parsed:
+                summary = parsed["summary"][:k]
+                if summary:
+                    print(f"  [agentic_summarizer] LLM summary for {date_str} ({len(summary)} sents)")
+                    return summary
+        except Exception as exc:
+            print(f"  [agentic_summarizer] LLM failed for {date_str}: {exc}")
+
+        # Fallback to extractive summarizer
+        return self._fallback.summarize(sents, k, vectorizer, filter)

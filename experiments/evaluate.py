@@ -3,7 +3,7 @@ from pathlib import Path
 from tilse.data.timelines import Timeline as TilseTimeline
 from tilse.data.timelines import GroundTruth as TilseGroundTruth
 from tilse.evaluation import rouge
-from news_tls import utils, data, datewise, clust, summarizers, agentic_clust
+from news_tls import utils, data, datewise, clust, summarizers, agentic_clust, agentic_datewise
 from pprint import pprint
 
 
@@ -191,6 +191,39 @@ def main(args):
             clip_sents=5,
             unique_dates=True,
         )
+
+    elif args.method == 'agentic_datewise':
+        # Agentic datewise: LLM-based date ranking (3 LLM calls) +
+        # LLM-based abstractive summarisation (default) or legacy
+        # CentroidOpt extractive summarisation (--summarizer centroid).
+        # Uses MentionCountDateRanker as pre-filter by default.
+        # Optionally uses SupervisedDateRanker if resources are provided.
+        base_ranker = datewise.MentionCountDateRanker()
+        key_to_model = None
+        if args.resources:
+            resources = Path(args.resources)
+            models_path = resources / 'supervised_date_ranker.{}.pkl'.format(
+                dataset_name
+            )
+            if models_path.exists():
+                key_to_model = utils.load_pkl(models_path)
+                base_ranker = datewise.SupervisedDateRanker(method='regression')
+
+        # Choose summarizer: agentic (default) or legacy centroid
+        if getattr(args, 'summarizer', 'agentic') == 'centroid':
+            summarizer_override = summarizers.CentroidOpt()
+        else:
+            summarizer_override = None  # AgenticDatewiseTimelineGenerator defaults to AgenticSummarizer
+
+        date_ranker = agentic_datewise.AgenticDateRanker(
+            base_ranker=base_ranker,
+        )
+        system = agentic_datewise.AgenticDatewiseTimelineGenerator(
+            date_ranker=date_ranker,
+            summarizer=summarizer_override,
+            key_to_model=key_to_model,
+        )
+
     else:
         raise ValueError(f'Method not found: {args.method}')
 
@@ -208,4 +241,7 @@ if __name__ == '__main__':
     parser.add_argument('--resources', default=None,
         help='model resources for tested method')
     parser.add_argument('--output', default=None)
+    parser.add_argument('--summarizer', default='agentic',
+        choices=['agentic', 'centroid'],
+        help='Summarizer for agentic_datewise: "agentic" (LLM, default) or "centroid" (legacy extractive)')
     main(parser.parse_args())
